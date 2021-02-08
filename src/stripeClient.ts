@@ -2,19 +2,30 @@
 
 import * as path from 'path';
 import * as vscode from 'vscode';
+import {ChildProcess, spawn} from 'child_process';
 import {OSType, getOSType} from './utils';
 import {Telemetry} from './telemetry';
 
 const execa = require('execa');
 const fs = require('fs');
 
+export enum StripeProcess {
+  LogsTail,
+}
+
+const stripeProcessToArgsMap: Map<StripeProcess, string[]> = new Map([
+  [StripeProcess.LogsTail, ['logs', 'tail']],
+]);
+
 export class StripeClient {
   telemetry: Telemetry;
   private cliPath: string | null;
+  private stripeProcesses: ChildProcess[];
 
-  constructor(telemetry:Telemetry) {
+  constructor(telemetry: Telemetry) {
     this.telemetry = telemetry;
     this.cliPath = null;
+    this.stripeProcesses = [];
     vscode.workspace.onDidChangeConfiguration(this.handleDidChangeConfiguration, this);
   }
 
@@ -58,7 +69,7 @@ export class StripeClient {
     const returnValue = await vscode.window.showErrorMessage(
       'Welcome! Stripe is using the Stripe CLI behind the scenes, and requires it to be installed on your machine',
       {},
-      ...[actionText]
+      ...[actionText],
     );
 
     if (returnValue === actionText) {
@@ -71,7 +82,7 @@ export class StripeClient {
     const returnValue = await vscode.window.showErrorMessage(
       'You need to login with the Stripe CLI for this project before you can continue',
       {},
-      ...[actionText]
+      ...[actionText],
     );
     if (returnValue === actionText) {
       vscode.commands.executeCommand('stripe.login');
@@ -79,9 +90,7 @@ export class StripeClient {
   }
 
   async isAuthenticated(): Promise<Boolean> {
-    const projectName = vscode.workspace
-      .getConfiguration('stripe')
-      .get('projectName', null);
+    const projectName = vscode.workspace.getConfiguration('stripe').get('projectName', null);
     try {
       const {stdout} = await execa(this.cliPath, ['config', '--list']);
       const hasConfigForProject = stdout
@@ -116,6 +125,39 @@ export class StripeClient {
     return this.cliPath;
   }
 
+  async getOrCreateStripeProcess(
+    stripeProcess: StripeProcess,
+    flags: string[] = [],
+  ): Promise<ChildProcess | null> {
+    if (this.stripeProcesses[stripeProcess]) {
+      return this.stripeProcesses[stripeProcess];
+    }
+
+    const cliPath = await this.getCLIPath();
+    if (!cliPath) {
+      return null;
+    }
+
+    const commandArgs = stripeProcessToArgsMap.get(stripeProcess);
+    if (!commandArgs) {
+      return null;
+    }
+
+    const projectName = vscode.workspace.getConfiguration('stripe').get('projectName', null);
+
+    const allFlags = [...(projectName ? ['--project-name', projectName] : []), ...flags];
+
+    this.stripeProcesses[stripeProcess] = spawn(cliPath, [...commandArgs, ...allFlags]);
+    return this.stripeProcesses[stripeProcess];
+  }
+
+  endStripeProcess(stripeProcess: StripeProcess): void {
+    if (this.stripeProcesses[stripeProcess]) {
+      this.stripeProcesses[stripeProcess].kill();
+      delete this.stripeProcesses[stripeProcess];
+    }
+  }
+
   private async detectInstalled() {
     const defaultInstallPath = (() => {
       const osType: OSType = getOSType();
@@ -140,7 +182,7 @@ export class StripeClient {
 
     const installPath = customInstallPath || defaultInstallPath;
 
-    if (installPath && await isFile(installPath)) {
+    if (installPath && (await isFile(installPath))) {
       this.cliPath = installPath;
       return true;
     }
@@ -148,7 +190,7 @@ export class StripeClient {
     if (customInstallPath) {
       vscode.window.showErrorMessage(
         `You set a custom installation path for the Stripe CLI, but we couldn't find the executable in '${customInstallPath}'`,
-        ...['Ok']
+        ...['Ok'],
       );
     } else {
       this.promptInstall();

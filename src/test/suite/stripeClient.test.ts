@@ -2,8 +2,9 @@ import * as assert from 'assert';
 import * as sinon from 'sinon';
 import * as utils from '../../utils';
 import * as vscode from 'vscode';
+import {StripeClient, StripeProcess} from '../../stripeClient';
 import {NoOpTelemetry} from '../../telemetry';
-import {StripeClient} from '../../stripeClient';
+import childProcess from 'child_process';
 
 const fs = require('fs');
 
@@ -29,13 +30,13 @@ suite('stripeClient', () => {
 
       osPathPairs.forEach(([os, path]) => {
         suite(`on ${os}`, () => {
-
           let realpathStub: sinon.SinonStub;
           let statStub: sinon.SinonStub;
 
           setup(() => {
             sandbox.stub(utils, 'getOSType').returns(os);
-            realpathStub = sandbox.stub(fs.promises, 'realpath')
+            realpathStub = sandbox
+              .stub(fs.promises, 'realpath')
               .withArgs(path)
               .returns(Promise.resolve(resolvedPath));
             statStub = sandbox.stub(fs.promises, 'stat').withArgs(resolvedPath);
@@ -67,14 +68,11 @@ suite('stripeClient', () => {
         const stripeClient = new StripeClient(new NoOpTelemetry());
         const cliPath = await stripeClient.getCLIPath();
         assert.strictEqual(cliPath, null);
-        assert.deepStrictEqual(
-          showErrorMessageSpy.args[0],
-          [
-            'Welcome! Stripe is using the Stripe CLI behind the scenes, and requires it to be installed on your machine',
-            {},
-            'Read instructions on how to install Stripe CLI',
-          ]
-        );
+        assert.deepStrictEqual(showErrorMessageSpy.args[0], [
+          'Welcome! Stripe is using the Stripe CLI behind the scenes, and requires it to be installed on your machine',
+          {},
+          'Read instructions on how to install Stripe CLI',
+        ]);
       });
     });
 
@@ -87,14 +85,15 @@ suite('stripeClient', () => {
       let statStub: sinon.SinonStub;
 
       setup(() => {
-        sandbox.stub(vscode.workspace, 'getConfiguration')
+        sandbox
+          .stub(vscode.workspace, 'getConfiguration')
           .withArgs('stripe')
           .returns(<any>{get: () => customPath});
-        realpathStub = sandbox.stub(fs.promises, 'realpath')
+        realpathStub = sandbox
+          .stub(fs.promises, 'realpath')
           .withArgs(customPath)
           .returns(Promise.resolve(resolvedPath));
         statStub = sandbox.stub(fs.promises, 'stat').withArgs(resolvedPath);
-
       });
 
       osTypes.forEach((os) => {
@@ -129,11 +128,76 @@ suite('stripeClient', () => {
         const stripeClient = new StripeClient(new NoOpTelemetry());
         const cliPath = await stripeClient.getCLIPath();
         assert.strictEqual(cliPath, null);
-        assert.deepStrictEqual(
-          showErrorMessageSpy.args[0],
-          ["You set a custom installation path for the Stripe CLI, but we couldn't find the executable in '/foo/bar/baz'", 'Ok'],
-        );
+        assert.deepStrictEqual(showErrorMessageSpy.args[0], [
+          "You set a custom installation path for the Stripe CLI, but we couldn't find the executable in '/foo/bar/baz'",
+          'Ok',
+        ]);
       });
+    });
+  });
+
+  suite('stripe processes', () => {
+    let spawnStub: sinon.SinonStub;
+
+    setup(() => {
+      spawnStub = sandbox
+        .stub(childProcess, 'spawn')
+        .returns(<childProcess.ChildProcess>{kill: () => {}});
+    });
+
+    test('spawns a child process with stripe logs tail', async () => {
+      const stripeClient = new StripeClient(new NoOpTelemetry());
+      sandbox.stub(stripeClient, 'getCLIPath').resolves('path/to/stripe');
+      const stripeLogsTailProcess = await stripeClient.getOrCreateStripeProcess(
+        StripeProcess.LogsTail,
+      );
+      assert.strictEqual(spawnStub.callCount, 1);
+      assert.deepStrictEqual(spawnStub.args[0], ['path/to/stripe', ['logs', 'tail']]);
+      assert.ok(stripeLogsTailProcess);
+    });
+
+    test('reuses existing stripe process if it already exists', async () => {
+      const stripeClient = new StripeClient(new NoOpTelemetry());
+      sandbox.stub(stripeClient, 'getCLIPath').resolves('path/to/stripe');
+      const stripeLogsTailProcess = await stripeClient.getOrCreateStripeProcess(
+        StripeProcess.LogsTail,
+      );
+      const stripeLogsTailProcess2 = await stripeClient.getOrCreateStripeProcess(
+        StripeProcess.LogsTail,
+      );
+      assert.strictEqual(spawnStub.callCount, 1);
+      assert.deepStrictEqual(spawnStub.args[0], ['path/to/stripe', ['logs', 'tail']]);
+      assert.deepStrictEqual(stripeLogsTailProcess, stripeLogsTailProcess2);
+    });
+
+    test('passes flags to spawn', async () => {
+      const flags = ['--format', 'JSON'];
+      const stripeClient = new StripeClient(new NoOpTelemetry());
+      sandbox.stub(stripeClient, 'getCLIPath').resolves('path/to/stripe');
+      const stripeLogsTailProcess = await stripeClient.getOrCreateStripeProcess(
+        StripeProcess.LogsTail,
+        flags,
+      );
+      assert.strictEqual(spawnStub.callCount, 1);
+      assert.deepStrictEqual(spawnStub.args[0], [
+        'path/to/stripe',
+        ['logs', 'tail', '--format', 'JSON'],
+      ]);
+      assert.ok(stripeLogsTailProcess);
+    });
+
+    test('ends stripe process', async () => {
+      const stripeClient = new StripeClient(new NoOpTelemetry());
+      sandbox.stub(stripeClient, 'getCLIPath').resolves('path/to/stripe');
+      const stripeLogsTailProcess = await stripeClient.getOrCreateStripeProcess(
+        StripeProcess.LogsTail,
+      );
+      if (!stripeLogsTailProcess) {
+        throw new assert.AssertionError();
+      }
+      const killStub = sandbox.stub(stripeLogsTailProcess, 'kill');
+      stripeClient.endStripeProcess(StripeProcess.LogsTail);
+      assert.strictEqual(killStub.callCount, 1);
     });
   });
 });
